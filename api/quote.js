@@ -7,6 +7,7 @@ const {
   toHex
 } = require("viem");
 const { deadPixelsBalance } = require("../lib/holder");
+const { getAssets: getStockAssets, getPrice: getStockPrice } = require("../lib/stocks");
 
 const CHAIN_ID = 4663;
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -17,6 +18,9 @@ const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 const UNISWAP_V3_QUOTER = "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7";
 const UNISWAP_SWAP_ROUTER_02 = "0xcaf681a66d020601342297493863e78c959e5cb2";
 const RPC = process.env.RH_RPC_URL || "https://rpc.mainnet.chain.robinhood.com/";
+const UNISWAP_TRADE_API = "https://trade-api.gateway.uniswap.org/v1";
+const UNISWAP_NATIVE = "0x0000000000000000000000000000000000000000";
+const UNISWAP_ROUTER_VERSION = "2.1.1";
 const FEES = [100, 500, 3000, 10000];
 
 const quoterAbi = parseAbi([
@@ -141,9 +145,24 @@ async function getTokenMap(){
 async function tokenInfo(address){
   const map=await getTokenMap();
   const a=address.toLowerCase();
-  if(map.has(a)) return map.get(a);
-  if(a===NATIVE && map.has(WETH.toLowerCase())) return map.get(WETH.toLowerCase());
-  return null;
+  const base=map.get(a)||null;
+  if(base && Number(base.priceUSD||0)>0) return base;
+  if(a===NATIVE && map.has(WETH.toLowerCase())){
+    const w=map.get(WETH.toLowerCase());
+    if(Number(w?.priceUSD||0)>0) return w;
+  }
+  // Stock Tokens may exist in aggregator catalogs without a usable USD price.
+  // Fall back to Robinhood's official Stock Token registry + market reference
+  // so BEST NET ranking can still account for output value and gas.
+  try{
+    const assets=await getStockAssets();
+    const stock=assets.find(x=>x.address.toLowerCase()===a);
+    if(stock){
+      const px=await getStockPrice(stock.symbol,stock);
+      return {...(base||{}),address:a,decimals:18,symbol:stock.symbol,priceUSD:px.fairValue,rwa:true};
+    }
+  }catch{}
+  return base;
 }
 async function ethPriceUsd(){
   const map=await getTokenMap();
@@ -236,6 +255,190 @@ async function getDirectWrap({sellToken,buyToken,sellAmount,taker,gasPrice,ethUs
     complexity:"DIRECT"
   };
   return addGasMetrics(base,{gasUnits,approvalGasUnits:0n,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount});
+}
+
+
+function uniswapHeaders(){
+  const key=String(process.env.UNISWAP_API_KEY||"");
+  if(!key) throw new Error("UNISWAP_API_KEY not configured");
+  return {
+    "x-api-key":key,
+    "content-type":"application/json",
+    "accept":"application/json",
+    "x-universal-router-version":UNISWAP_ROUTER_VERSION,
+    // Native UniswapX requires EIP-7914/7702 wallet preparation.
+    // Keep it off for native ETH in V2; ERC20 input can still receive UniswapX.
+    "x-erc20eth-enabled":"false"
+  };
+}
+function uniToken(token){
+  return token.toLowerCase()===NATIVE ? UNISWAP_NATIVE : token;
+}
+function pickNumber(...values){
+  for(const v of values){
+    const n=Number(v);
+    if(Number.isFinite(n) && n>=0) return n;
+  }
+  return null;
+}
+function uniOutputAmount(resp){
+  const q=resp?.quote||{};
+  if(q.output?.amount!=null) return String(q.output.amount);
+  if(q.output?.startAmount!=null) return String(q.output.startAmount);
+  if(Array.isArray(q.outputs) && q.outputs[0]?.startAmount!=null) return String(q.outputs[0].startAmount);
+  if(Array.isArray(q.aggregatedOutputs) && q.aggregatedOutputs.length){
+    try{
+      return q.aggregatedOutputs.reduce((a,x)=>a+BigInt(x.amount||0),0n).toString();
+    }catch{}
+  }
+  return null;
+}
+function uniMinimumAmount(resp){
+  const q=resp?.quote||{};
+  if(q.output?.minimumAmount!=null) return String(q.output.minimumAmount);
+  if(q.output?.endAmount!=null) return String(q.output.endAmount);
+  if(Array.isArray(q.outputs) && q.outputs[0]?.endAmount!=null) return String(q.outputs[0].endAmount);
+  return null;
+}
+function weiFeeUsd(value,ethUsd){
+  try{
+    if(value==null||!ethUsd)return null;
+    return Number(BigInt(String(value)))/1e18*ethUsd;
+  }catch{return null;}
+}
+function uniClassicGasUsd(resp,gasPrice,ethUsd){
+  const q=resp?.quote||{};
+  const direct=pickNumber(
+    q.gasFeeUSD,q.gasFeeUsd,q.gasUseEstimateUSD,q.gasUseEstimateUsd,
+    resp?.gasFeeUSD,resp?.gasFeeUsd
+  );
+  if(direct!=null)return direct;
+
+  const gasUnits=pickNumber(q.gasUseEstimate,q.gasEstimate,q.gasLimit);
+  if(gasUnits!=null && gasPrice!=null && ethUsd){
+    return Number(BigInt(Math.ceil(gasUnits))*BigInt(gasPrice))/1e18*ethUsd;
+  }
+  return null;
+}
+function normalizePreparedTx(tx){
+  if(!tx||!addressOk(tx.to)||!/^0x[0-9a-fA-F]*$/.test(tx.data||"0x"))return null;
+  return {
+    to:tx.to,
+    data:tx.data||"0x",
+    value:rpcHex(tx.value||0),
+    gas:tx.gasLimit||tx.gas||null,
+    gasPrice:tx.gasPrice||null,
+    maxFeePerGas:tx.maxFeePerGas||null,
+    maxPriorityFeePerGas:tx.maxPriorityFeePerGas||null
+  };
+}
+
+async function getUniswapOfficial({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice,ethUsd,buyInfo,sellInfo}){
+  const headers=uniswapHeaders();
+  const tokenIn=uniToken(sellToken);
+  const tokenOut=uniToken(buyToken);
+
+  let approval=null,cancel=null,approvalGasUsd=0;
+  if(sellToken.toLowerCase()!==NATIVE){
+    try{
+      const ap=await fetchJson(`${UNISWAP_TRADE_API}/check_approval`,{
+        method:"POST",
+        headers,
+        body:JSON.stringify({
+          walletAddress:taker,
+          token:tokenIn,
+          amount:String(sellAmount),
+          chainId:CHAIN_ID,
+          tokenOut,
+          tokenOutChainId:CHAIN_ID,
+          includeGasInfo:true
+        })
+      },12000);
+      approval=normalizePreparedTx(ap.approval);
+      cancel=normalizePreparedTx(ap.cancel);
+      approvalGasUsd=weiFeeUsd(ap.gasFee,ethUsd)||0;
+      if(cancel) approvalGasUsd+=(weiFeeUsd(ap.cancelGasFee,ethUsd)||0);
+    }catch(e){
+      // Approval lookup failure must not manufacture an approval target.
+      // Quote can still be surfaced, but execution will refresh/check again.
+    }
+  }
+
+  const body={
+    tokenIn,
+    tokenOut,
+    tokenInChainId:CHAIN_ID,
+    tokenOutChainId:CHAIN_ID,
+    type:"EXACT_INPUT",
+    amount:String(sellAmount),
+    swapper:taker,
+    slippageTolerance:Number(slippageBps)/100,
+    routingPreference:"BEST_PRICE",
+    permitAmount:"EXACT"
+  };
+
+  const uq=await fetchJson(`${UNISWAP_TRADE_API}/quote`,{
+    method:"POST",
+    headers,
+    body:JSON.stringify(body)
+  },14000);
+
+  const out=uniOutputAmount(uq);
+  if(!out) throw new Error("Uniswap API returned no output amount");
+
+  const routing=String(uq.routing||"").toUpperCase();
+  const isOrder=["DUTCH_V2","DUTCH_V3","PRIORITY","LIMIT_ORDER"].includes(routing);
+  const isSwap=["CLASSIC","WRAP","UNWRAP"].includes(routing);
+  if(!isOrder&&!isSwap) throw new Error(`Unsupported Uniswap routing: ${routing||"UNKNOWN"}`);
+
+  const grossUsd=tokenAmountUsd(out,buyInfo);
+  let gasUsd;
+  if(isOrder){
+    // Filler pays the swap execution gas. First-time Permit2 approval, if any,
+    // is still a user-paid onchain transaction and is counted.
+    gasUsd=approvalGasUsd;
+  }else{
+    const classic=uniClassicGasUsd(uq,gasPrice,ethUsd);
+    gasUsd=(classic==null?null:classic+approvalGasUsd);
+  }
+  const netUsd=(grossUsd!=null&&gasUsd!=null)?grossUsd-gasUsd:null;
+  const sellUsd=tokenAmountUsd(sellAmount,sellInfo);
+  const gasImpactPct=(gasUsd!=null&&sellUsd&&sellUsd>0)?gasUsd/sellUsd*100:null;
+
+  const min=uniMinimumAmount(uq) || out;
+  const classicBaseline=pickNumber(uq?.quote?.classicGasUseEstimateUSD);
+  const route=isOrder
+    ? `${routing==="DUTCH_V3"?"UNISWAPX V3":routing} // GASLESS FILLER EXECUTION`
+    : `OFFICIAL BEST_PRICE // ${routing}`;
+
+  return {
+    provider:"uniswapapi",
+    label:isOrder?"UNISWAPX GASLESS":"UNISWAP OFFICIAL",
+    baseline:true,
+    buyAmount:String(out),
+    minBuyAmount:String(min),
+    approvalSpender:null,
+    approvalTransaction:approval,
+    cancelTransaction:cancel,
+    providerFeeUsd:0,
+    gasUsd,
+    grossUsd,
+    netUsd,
+    gasImpactPct,
+    gasUnits:null,
+    approvalGasUnits:"0",
+    route,
+    transaction:null,
+    execution:{
+      kind:isOrder?"ORDER":"SWAP",
+      routing,
+      quote:uq.quote,
+      permitData:uq.permitData||null,
+      permitTransaction:normalizePreparedTx(uq.permitTransaction),
+      requestId:uq.requestId||null,
+      classicGasUseEstimateUSD:classicBaseline
+    }
+  };
 }
 
 async function getNordstern({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice,ethUsd,buyInfo,sellInfo}){
@@ -510,7 +713,7 @@ module.exports = async function handler(req,res){
     if(!addressOk(taker)) return json(res,400,{error:"INVALID_TAKER"});
     try{ if(BigInt(sellAmount)<=0n) throw 0; }catch{return json(res,400,{error:"INVALID_SELL_AMOUNT"});}
     if(!Number.isInteger(slippageBps)||slippageBps<1||slippageBps>500) return json(res,400,{error:"INVALID_SLIPPAGE"});
-    if(!["all","wrap","nordstern","lifi","uniswap"].includes(provider)) return json(res,400,{error:"INVALID_PROVIDER"});
+    if(!["all","wrap","uniswapapi","nordstern","lifi"].includes(provider)) return json(res,400,{error:"INVALID_PROVIDER"});
 
     // HARD PORTAL GATE: no executable quote is returned unless the taker
     // currently owns at least one DEAD PIXELS NFT.
@@ -537,9 +740,12 @@ module.exports = async function handler(req,res){
     }
 
     if(!isWrapPair){
-      if(provider==="all"||provider==="nordstern") jobs.push(["NORDSTERN",()=>getNordstern(args)]);
-      if(provider==="all"||provider==="lifi") jobs.push(["LI.FI",()=>getLifi(args)]);
-      if(provider==="all"||provider==="uniswap") jobs.push(["UNISWAP",()=>getUniswapDirect(args)]);
+      if((provider==="all"||provider==="uniswapapi") && process.env.UNISWAP_API_KEY)
+        jobs.push(["UNISWAP OFFICIAL",()=>getUniswapOfficial(args)]);
+      if(provider==="all"||provider==="nordstern")
+        jobs.push(["NORDSTERN",()=>getNordstern(args)]);
+      if(provider==="all"||provider==="lifi")
+        jobs.push(["LI.FI",()=>getLifi(args)]);
     }
 
     const settled=await Promise.all(jobs.map(async ([name,fn])=>{
@@ -558,6 +764,15 @@ module.exports = async function handler(req,res){
 
     const errors=settled.filter(x=>!x.ok).map(({provider,error})=>({provider,error}));
     const sellUsd=tokenAmountUsd(sellAmount,sellInfo);
+    const uniswapBaseline=quotes.find(x=>x.provider==="uniswapapi")||null;
+    const best=quotes[0]||null;
+    let savingsVsUniswapUsd=null;
+    let savingsVsUniswapPct=null;
+    if(best?.netUsd!=null && uniswapBaseline?.netUsd!=null){
+      savingsVsUniswapUsd=Math.max(0,best.netUsd-uniswapBaseline.netUsd);
+      if(uniswapBaseline.netUsd>0)
+        savingsVsUniswapPct=savingsVsUniswapUsd/uniswapBaseline.netUsd*100;
+    }
 
     return json(res,200,{
       chainId:CHAIN_ID,
@@ -569,16 +784,18 @@ module.exports = async function handler(req,res){
       sellValueUsd:sellUsd,
       providers:[
         {name:"DIRECT WRAP",enabled:true,for:"ETH/WETH"},
+        {name:"UNISWAP OFFICIAL",enabled:!!process.env.UNISWAP_API_KEY,mode:"BEST_PRICE"},
         {name:"NORDSTERN DIRECT",enabled:true},
-        {name:"UNISWAP DIRECT",enabled:true,version:"V3"},
         {name:"LI.FI",enabled:true}
       ],
-      quotes,errors,generatedAt:new Date().toISOString(),
-      uniswap:{
-        quoter:UNISWAP_V3_QUOTER,
-        swapRouter02:UNISWAP_SWAP_ROUTER_02,
-        feeTiers:FEES
-      }
+      baseline:{
+        provider:"UNISWAP OFFICIAL",
+        available:!!uniswapBaseline,
+        netUsd:uniswapBaseline?.netUsd??null
+      },
+      savingsVsUniswapUsd,
+      savingsVsUniswapPct,
+      quotes,errors,generatedAt:new Date().toISOString()
     });
   }catch(e){
     return json(res,500,{error:e.message||"QUOTE_FAILED"});
