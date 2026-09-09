@@ -1,11 +1,19 @@
 {
   "name": "dead-pixels-glitch-router",
-  "version": "3.0.0",
+  "version": "4.0.0",
   "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
+    "@alchemy/wallet-apis": "^5.0.0",
     "viem": "^2.37.6"
+  },
+  "devDependencies": {
+    "vite": "^7.1.0"
   }
 }
