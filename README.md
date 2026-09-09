@@ -1,57 +1,93 @@
-# DEAD PIXELS // GLITCH ROUTER V4 — GAS OPTIMIZED
+# DEAD PIXELS // GLITCH ROUTER V6
+## NORDSTERN + HOLDER GATE
 
-No Paymaster. No gas sponsorship. User pays the actual network gas.
+**Only DEAD PIXELS holders can obtain executable swap quotes through this portal.**
 
-The goal of V4 is different:
+DEAD PIXELS NFT:
+`0x27390fe7ae676fbfdb632e61cd4019996b07892c`
 
-**choose the route that leaves the user with the most value AFTER estimated gas.**
+Minimum:
+`1 NFT`
 
-## Providers
+## Routing stack
 
-- LI.FI
-- Direct Uniswap V3
-- 0 bps DEAD PIXELS protocol fee
-
-## Gas optimizations
-
-### 1. Best Net Output
-When live USD pricing is available, routes are ranked by:
+Special case:
 
 ```text
-gross token value
+ETH ↔ WETH
+→ direct WETH deposit()/withdraw()
+```
+
+All other routable pairs:
+
+```text
+NORDSTERN DIRECT
+UNISWAP DIRECT V3
+LI.FI
+        ↓
+compare output + estimated gas + provider fee
+        ↓
+BEST NET OUTPUT
+```
+
+DEAD PIXELS protocol fee:
+`0 bps`
+
+## Holder gate
+
+The frontend checks `/api/holder` when a wallet connects.
+
+More importantly, `/api/quote` performs its own onchain DEAD PIXELS `balanceOf(taker)` check before returning any executable transaction.
+
+A non-holder therefore cannot bypass the UI by simply calling the portal quote endpoint directly.
+
+This gate applies to GLITCH ROUTER itself. It obviously does not prevent a non-holder from using Uniswap, LI.FI, Nordstern, or another DEX outside our portal.
+
+## Nordstern integration
+
+The direct provider uses:
+
+```text
+GET https://api.nordstern.finance/aggregator/4663
+?src=...
+&dst=...
+&amount=...
+```
+
+Robinhood native ETH is translated from the portal's internal native-token sentinel to the zero-address native representation for the Nordstern request.
+
+The integration consumes the returned `toAmount` and executable `tx`.
+
+For ERC-20 sells, the approval spender is selected from explicit Nordstern response fields when available, with the returned transaction destination used as a compatibility fallback. Approval remains exact-to-trade, never unlimited.
+
+For safety, a native-input Nordstern quote is rejected if its returned transaction has no `tx.value`; the router does not guess or manufacture provider calldata.
+
+## Token list
+
+The `/api/tokens` endpoint now attempts to merge:
+
+- LI.FI token catalog
+- Nordstern token catalog
+
+If one source is unavailable, the other can still populate the selector.
+
+Users can still paste any ERC-20 contract manually.
+
+## Gas ranking
+
+When USD prices are available:
+
+```text
+gross output value
 - estimated network gas
-- provider fee (when reported)
+- reported provider fee
 = estimated net value
 ```
 
-This means a route with slightly lower token output can beat a more expensive route if it uses materially less gas.
+When reliable USD pricing is missing, fallback ranking is:
 
-### 2. Direct vs two-hop Uniswap
-The direct Uniswap scanner still checks:
-
-- token A → token B
-- token A → WETH → token B
-- token A → USDG → token B
-
-But V4 no longer automatically picks the route with the highest raw token output.
-
-It evaluates the Quoter gas estimate for each candidate and selects the best estimated net result when token pricing is available.
-
-### 3. Approval gas included
-For ERC-20 sells, V4 checks current allowance.
-
-If a new approval is required, its estimated gas is added to route cost before ranking.
-
-### 4. High Gas Impact warning
-The UI compares estimated gas cost against the approximate USD size of the input trade.
-
-- >= 5%: warning
-- >= 20%: high gas impact warning
-
-The swap is not silently blocked; the user can decide.
-
-### 5. No Paymaster
-There are no Alchemy Gas Manager dependencies or sponsorship bills in this build.
+1. highest token output
+2. lower estimated gas as a tie-breaker
 
 ## Environment
 
@@ -62,25 +98,32 @@ LIFI_API_KEY=
 RH_RPC_URL=https://rpc.mainnet.chain.robinhood.com/
 ```
 
-For production, a dedicated RPC is recommended because gas-aware direct Uniswap scanning performs multiple `eth_call` / gas-estimation requests.
+No Nordstern API key is required by this build.
 
-## Important caveat
+A dedicated RPC is recommended in production because every executable quote now includes:
 
-Gas values are estimates. Final wallet/network cost can change between quote and inclusion.
+- holder NFT balance check
+- provider quote calls
+- Uniswap onchain quote calls
+- gas estimation
+- allowance checks when applicable
 
-When reliable token USD prices are unavailable, V4 falls back to:
+## Test plan
 
-1. highest expected token output
-2. lower estimated gas as a tie-breaker
+1. Deploy to Vercel preview.
+2. Open `/api/health`.
+3. Connect a wallet with **0 DEAD PIXELS**.
+   - page should show `ACCESS DENIED`
+   - `/api/quote` should return HTTP 403.
+4. Connect a wallet with **1+ DEAD PIXELS**.
+   - page should show `HOLDER ACCESS GRANTED`
+   - quote scanning should unlock.
+5. Test `ETH → NVDA`.
+   - Nordstern / Uniswap / LI.FI should compete when available.
+6. Test `ETH → WETH`.
+   - DIRECT WRAP should be used 1:1.
+7. Start with tiny live transactions and inspect the destination in the wallet before confirming.
 
-## Test
+## Important
 
-Deploy to Vercel preview first.
-
-Check:
-
-```text
-/api/health
-```
-
-Then compare a tiny trade and a normal-sized trade. A tiny trade should show a HIGH GAS IMPACT warning when network cost is disproportionately large.
+Nordstern, LI.FI and Uniswap are third-party execution/liquidity providers. GLITCH ROUTER remains non-custodial and does not deploy a DEAD PIXELS swap contract in this build.

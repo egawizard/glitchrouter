@@ -60,6 +60,26 @@ a{color:inherit}
 .mini.active{border-color:var(--acid);color:var(--acid)}
 .wallet-btn{white-space:nowrap;background:#111}
 .wallet-btn.connected{color:var(--acid);border-color:#536c19}
+
+.holder-gate{
+ display:grid;grid-template-columns:38px 1fr auto;align-items:center;gap:11px;
+ border:1px solid #3a3a36;background:#080808;padding:11px 12px;margin-bottom:13px;
+ position:relative;overflow:hidden
+}
+.holder-gate:after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,#555,transparent)}
+.holder-gate.granted{border-color:#607c19;background:linear-gradient(90deg,rgba(195,255,35,.075),#080808 45%)}
+.holder-gate.denied{border-color:#662438;background:linear-gradient(90deg,rgba(255,44,84,.06),#080808 45%)}
+.holder-gate-icon{width:34px;height:34px;border:1px solid #353531;display:grid;place-items:center;font-size:15px}
+.holder-gate small{display:block;color:#696963;font-size:7px;letter-spacing:.13em;margin-bottom:4px}
+.holder-gate b{display:block;font-size:10px;letter-spacing:.04em}
+.holder-gate span{display:block;color:#777770;font-size:8px;margin-top:4px}
+.holder-gate.granted span{color:var(--acid)}
+.holder-gate.denied span{color:#ff6f88}
+.holder-gate-badge{border:1px solid #3e3e39;padding:6px 7px;font-size:8px;color:#777}
+.holder-gate.granted .holder-gate-badge{border-color:var(--acid);color:#000;background:var(--acid);font-weight:700}
+.holder-gate.denied .holder-gate-badge{border-color:#8b2940;color:#ff6f88}
+.locked-control{opacity:.43;pointer-events:none;filter:saturate(.45)}
+
 .tokenbox{border:1px solid #343431;background:#050505;padding:14px;margin-top:8px;transition:border-color .15s}
 .tokenbox:focus-within{border-color:#62625b}
 .tokenbox-head{display:flex;justify-content:space-between;align-items:center;color:#77776f;font-size:9px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}
@@ -107,6 +127,7 @@ a{color:inherit}
  .page{padding:70px 11px 18px;gap:22px}
  .hero{padding-top:8px}.hero p{font-size:10px}.hero-grid{grid-template-columns:1fr 1fr}.hero-grid div:nth-child(2){border-right:0}.hero-grid div:last-child{grid-column:1/-1;border-top:1px solid var(--line)}
  .swap{padding:13px}.toolbar{align-items:flex-start;flex-direction:column}.wallet-btn{width:100%}
+ .holder-gate{grid-template-columns:34px 1fr}.holder-gate-badge{grid-column:1/-1;text-align:center}
  .tokenrow{grid-template-columns:1fr 126px}.amount,.out-amount{font-size:28px}
  .details{grid-template-columns:1fr 1fr}.details div:last-child{grid-column:1/-1}
  .footerline{font-size:7px}
@@ -149,6 +170,16 @@ a{color:inherit}
           <button class="mini" data-pair="WETH,USDG">WETH / USDG</button>
         </div>
         <button id="walletBtn" class="wallet-btn">CONNECT WALLET</button>
+      </div>
+
+      <div id="holderGate" class="holder-gate">
+        <div class="holder-gate-icon">👾</div>
+        <div class="holder-gate-copy">
+          <small>DEAD PIXELS ACCESS CONTROL</small>
+          <b id="holderGateTitle">CONNECT WALLET TO UNLOCK SWAPS</b>
+          <span id="holderGateDetail">1+ DEAD PIXEL REQUIRED // ONCHAIN CHECK</span>
+        </div>
+        <div id="holderGateBadge" class="holder-gate-badge">LOCKED</div>
       </div>
 
       <div class="tokenbox">
@@ -198,7 +229,7 @@ a{color:inherit}
 
       <div class="details">
         <div><small>PROTOCOL FEE</small><b>0.00%</b></div>
-        <div><small>ROUTING</small><b id="routingLabel">LI.FI + UNISWAP</b></div>
+        <div><small>ROUTING</small><b id="routingLabel">NORDSTERN + UNI + LI.FI</b></div>
         <div><small>EXECUTION</small><b>YOUR WALLET</b></div>
       </div>
     </div>
@@ -226,7 +257,7 @@ a{color:inherit}
 
   const $ = id => document.getElementById(id);
   const els = {
-    walletBtn:$("walletBtn"), sellAmount:$("sellAmount"), sellToken:$("sellToken"), buyToken:$("buyToken"),
+    walletBtn:$("walletBtn"), holderGate:$("holderGate"), holderGateTitle:$("holderGateTitle"), holderGateDetail:$("holderGateDetail"), holderGateBadge:$("holderGateBadge"), sellAmount:$("sellAmount"), sellToken:$("sellToken"), buyToken:$("buyToken"),
     buyAmount:$("buyAmount"), slippage:$("slippage"), quotePanel:$("quotePanel"), actionBtn:$("actionBtn"),
     status:$("statusLog"), maxBtn:$("maxBtn"), reverseBtn:$("reverseBtn"), rwa:$("rwaNotice"),
     sellCustomWrap:$("sellCustomWrap"), buyCustomWrap:$("buyCustomWrap"),
@@ -236,6 +267,7 @@ a{color:inherit}
   };
 
   let account = null, quotes = [], selectedQuote = null, quoteTimer = null;
+  let holderState = {checked:false,eligible:false,balance:0};
   let customSell = null, customBuy = null, quoteAbort = null;
   let tokenCatalog = [];
 
@@ -322,6 +354,51 @@ a{color:inherit}
     return j;
   }
 
+  function applyHolderGate(){
+    const controls=[els.sellAmount,els.sellToken,els.buyToken,els.slippage,els.reverseBtn,els.maxBtn];
+    const unlocked=!!(account&&holderState.checked&&holderState.eligible);
+    controls.forEach(el=>{if(el)el.disabled=!unlocked});
+    document.querySelectorAll(".pair-buttons .mini").forEach(el=>el.disabled=!unlocked);
+
+    els.holderGate.classList.remove("granted","denied");
+    if(!account){
+      els.holderGateTitle.textContent="CONNECT WALLET TO UNLOCK SWAPS";
+      els.holderGateDetail.textContent="1+ DEAD PIXEL REQUIRED // ONCHAIN CHECK";
+      els.holderGateBadge.textContent="LOCKED";
+    }else if(!holderState.checked){
+      els.holderGateTitle.textContent="CHECKING DEAD PIXELS...";
+      els.holderGateDetail.textContent="READING NFT BALANCE ON ROBINHOOD CHAIN";
+      els.holderGateBadge.textContent="CHECKING";
+    }else if(holderState.eligible){
+      els.holderGate.classList.add("granted");
+      els.holderGateTitle.textContent="HOLDER ACCESS GRANTED";
+      els.holderGateDetail.textContent=`${holderState.balance} DEAD PIXELS DETECTED // SWAPS UNLOCKED`;
+      els.holderGateBadge.textContent="UNLOCKED";
+    }else{
+      els.holderGate.classList.add("denied");
+      els.holderGateTitle.textContent="ACCESS DENIED";
+      els.holderGateDetail.textContent="HOLD AT LEAST 1 DEAD PIXEL TO USE GLITCH ROUTER";
+      els.holderGateBadge.textContent="NO NFT";
+    }
+    updateAction();
+  }
+
+  async function checkHolder(){
+    holderState={checked:false,eligible:false,balance:0};
+    applyHolderGate();
+    if(!account)return;
+    try{
+      const h=await api(`/api/holder?wallet=${encodeURIComponent(account)}`);
+      holderState={checked:true,eligible:!!h.eligible,balance:Number(h.balance||0)};
+      if(holderState.eligible)setStatus(`HOLDER VERIFIED // ${holderState.balance} DEAD PIXELS // ROUTER UNLOCKED`,"ok");
+      else setStatus("DEAD PIXELS HOLDER REQUIRED // SWAPS LOCKED","err");
+    }catch(e){
+      holderState={checked:true,eligible:false,balance:0};
+      setStatus(`HOLDER CHECK ERROR // ${e.message}`,"err");
+    }
+    applyHolderGate();
+  }
+
   async function resolveKnownToken(key){
     const t={...TOKENS[key]};
     if(t.native) return t;
@@ -397,8 +474,9 @@ a{color:inherit}
       els.walletBtn.textContent=short(account); els.walletBtn.classList.add("connected");
       setStatus("WALLET CONNECTED // ROBINHOOD CHAIN","ok");
       await updateBalance();
+      await checkHolder();
       updateAction();
-      scheduleQuote(150);
+      if(holderState.eligible)scheduleQuote(150);
     }catch(e){ setStatus(`WALLET ERROR // ${e.message}`,"err"); }
   }
 
@@ -428,6 +506,7 @@ a{color:inherit}
 
   async function fetchQuotes(provider="all"){
     if(!account) throw new Error("CONNECT WALLET");
+    if(!holderState.eligible) throw new Error("DEAD PIXELS HOLDER REQUIRED");
     const sell=await currentToken("sell"), buy=await currentToken("buy");
     if(!sell||!buy) throw new Error("TOKEN NOT READY");
     if(sell.address.toLowerCase()===buy.address.toLowerCase()) throw new Error("SELECT TWO DIFFERENT TOKENS");
@@ -470,10 +549,10 @@ a{color:inherit}
 
   async function getQuote(){
     if(quoteAbort) quoteAbort.abort();
-    if(!account || !els.sellAmount.value || Number(els.sellAmount.value)<=0){updateAction();return;}
+    if(!account || !holderState.eligible || !els.sellAmount.value || Number(els.sellAmount.value)<=0){updateAction();return;}
     try{
       setStatus("SCANNING ROUTES // REQUESTING EXECUTABLE QUOTES...");
-      els.quotePanel.innerHTML='<div class="empty">SCANNING LI.FI + UNISWAP...</div>';
+      els.quotePanel.innerHTML='<div class="empty">SCANNING NORDSTERN + UNI + LI.FI...</div>';
       const {data,buy}=await fetchQuotes("all");
       renderQuotes(data,buy);
       const enabled=(data.providers||[]).filter(x=>x.enabled).map(x=>x.name).join(" + ");
@@ -565,6 +644,8 @@ a{color:inherit}
 
   function updateAction(){
     if(!account){els.actionBtn.textContent="CONNECT WALLET";els.actionBtn.disabled=false;return;}
+    if(!holderState.checked){els.actionBtn.textContent="CHECKING HOLDER ACCESS...";els.actionBtn.disabled=true;return;}
+    if(!holderState.eligible){els.actionBtn.textContent="DEAD PIXELS HOLDER REQUIRED";els.actionBtn.disabled=true;return;}
     if(!els.sellAmount.value||Number(els.sellAmount.value)<=0){els.actionBtn.textContent="ENTER AMOUNT";els.actionBtn.disabled=true;return;}
     if(!selectedQuote){els.actionBtn.textContent="GET BEST QUOTE";els.actionBtn.disabled=false;return;}
     els.actionBtn.textContent=`EXECUTE VIA ${selectedQuote.label.toUpperCase()}`; els.actionBtn.disabled=false;
@@ -619,10 +700,11 @@ a{color:inherit}
   }));
 
   if(window.ethereum){
-    ethereum.on?.("accountsChanged",async a=>{account=a?.[0]||null;if(account){els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected")}else{els.walletBtn.textContent="CONNECT WALLET";els.walletBtn.classList.remove("connected")}selectedQuote=null;await updateBalance();updateAction();});
+    ethereum.on?.("accountsChanged",async a=>{account=a?.[0]||null;if(account){els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected")}else{els.walletBtn.textContent="CONNECT WALLET";els.walletBtn.classList.remove("connected")}selectedQuote=null;await updateBalance();await checkHolder();updateAction();});
     ethereum.on?.("chainChanged",()=>location.reload());
     ethereum.request({method:"eth_accounts"}).then(async a=>{if(a?.[0]){account=a[0];els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected");await updateBalance();updateAction();}}).catch(()=>{});
   }
+  applyHolderGate();
   updateAction();
   loadTokenCatalog();
 

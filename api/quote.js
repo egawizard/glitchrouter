@@ -6,9 +6,11 @@ const {
   parseAbi,
   toHex
 } = require("viem");
+const { deadPixelsBalance } = require("../lib/holder");
 
 const CHAIN_ID = 4663;
 const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const NORD_NATIVE = "0x0000000000000000000000000000000000000000";
 const WETH = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73";
 const USDG = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168";
 
@@ -71,7 +73,9 @@ function safeTx(tx){
   return {
     to:tx.to,
     data:tx.data||"0x",
-    value:tx.value||"0x0",
+    // Wallet RPC expects transaction value in hex. Normalize provider responses
+    // because some APIs return decimal strings while others return 0x values.
+    value:rpcHex(tx.value==null?0:tx.value),
     gas:tx.gas||tx.gasLimit||null,
     gasPrice:tx.gasPrice||null
   };
@@ -82,6 +86,9 @@ function sumUsd(items){
 }
 function wrapped(token){
   return token.toLowerCase()===NATIVE ? getAddress(WETH.toLowerCase()) : getAddress(token.toLowerCase());
+}
+function nordToken(token){
+  return token.toLowerCase()===NATIVE ? NORD_NATIVE : token;
 }
 function minOut(amountOut, slippageBps){
   return (BigInt(amountOut) * BigInt(10000 - slippageBps)) / 10000n;
@@ -96,6 +103,11 @@ function pathHex(tokens, fees){
 }
 function padAddress(a){ return a.toLowerCase().replace(/^0x/,"").padStart(64,"0"); }
 function toHex32(n){ return BigInt(n).toString(16).padStart(64,"0"); }
+function rpcHex(v){
+  if(v==null) return "0x0";
+  const s=String(v);
+  return /^0x[0-9a-fA-F]+$/.test(s) ? s : "0x"+BigInt(s).toString(16);
+}
 
 async function getTokenMap(){
   if(Date.now()-tokenCache.at < 300000 && tokenCache.map.size) return tokenCache.map;
@@ -160,7 +172,7 @@ async function estimateApprovalGas(token,owner,spender,amount){
 }
 async function estimateTxGas(tx,taker,fallback=null){
   try{
-    const req={from:taker,to:tx.to,data:tx.data||"0x",value:tx.value||"0x0"};
+    const req={from:taker,to:tx.to,data:tx.data||"0x",value:rpcHex(tx.value||"0x0")};
     const g=await rpc("eth_estimateGas",[req]);
     return BigInt(g);
   }catch{
@@ -199,6 +211,107 @@ function addGasMetrics(q,{gasUnits,approvalGasUnits=0n,gasPrice,ethUsd,buyInfo,s
   };
 }
 
+async function getDirectWrap({sellToken,buyToken,sellAmount,taker,gasPrice,ethUsd,buyInfo,sellInfo}){
+  const sell=sellToken.toLowerCase(), buy=buyToken.toLowerCase(), weth=WETH.toLowerCase();
+  const isWrap=sell===NATIVE && buy===weth;
+  const isUnwrap=sell===weth && buy===NATIVE;
+  if(!isWrap && !isUnwrap) throw new Error("NOT_A_WRAP_PAIR");
+
+  let tx;
+  if(isWrap){
+    tx={to:WETH,data:"0xd0e30db0",value:toHex(BigInt(sellAmount)),gas:null,gasPrice:null};
+  }else{
+    tx={to:WETH,data:"0x2e1a7d4d"+toHex32(sellAmount),value:"0x0",gas:null,gasPrice:null};
+  }
+  const gasUnits=await estimateTxGas(tx,taker,isWrap?30000n:38000n);
+  const base={
+    provider:"wrap",
+    label:isWrap?"DIRECT WRAP":"DIRECT UNWRAP",
+    buyAmount:String(sellAmount),
+    minBuyAmount:String(sellAmount),
+    approvalSpender:null,
+    providerFeeUsd:0,
+    route:isWrap?"ETH → WETH CONTRACT // 1:1":"WETH → ETH CONTRACT // 1:1",
+    transaction:tx,
+    complexity:"DIRECT"
+  };
+  return addGasMetrics(base,{gasUnits,approvalGasUnits:0n,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount});
+}
+
+async function getNordstern({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice,ethUsd,buyInfo,sellInfo}){
+  const p=new URLSearchParams({
+    src:nordToken(sellToken),
+    dst:nordToken(buyToken),
+    amount:String(sellAmount)
+  });
+  // Nordstern's public Swap API documents src/dst/amount. "from" is included
+  // as a compatibility hint; providers that ignore unknown parameters are safe.
+  p.set("from",taker);
+
+  const q=await fetchJson(`https://api.nordstern.finance/aggregator/${CHAIN_ID}?${p}`,{
+    headers:{accept:"application/json"}
+  },12000);
+
+  const tx=safeTx(q.tx||q.transaction);
+  if(!tx || !q.toAmount) throw new Error("Nordstern returned no executable route");
+
+  // Preserve provider calldata/value exactly. For a native input, the API is
+  // expected to return msg.value. If it does not, fail closed instead of guessing.
+  if(sellToken.toLowerCase()===NATIVE && BigInt(rpcHex(tx.value||"0x0"))===0n){
+    throw new Error("Nordstern native quote missing tx.value");
+  }
+
+  const approvalSpender = sellToken.toLowerCase()===NATIVE ? null :
+    [q.approvalSpender,q.approvalAddress,q.allowanceTarget,q.spender,tx.to]
+      .find(addressOk) || null;
+
+  let approvalGas=0n;
+  let currentAllowance=2n**256n-1n;
+  if(sellToken.toLowerCase()!==NATIVE && approvalSpender){
+    currentAllowance=await allowance(sellToken,taker,approvalSpender);
+    if(currentAllowance<BigInt(sellAmount)){
+      approvalGas=await estimateApprovalGas(sellToken,taker,approvalSpender,sellAmount);
+    }
+  }
+
+  let swapGas=null;
+  for(const candidate of [q.gas,q.gasEstimate,q.estimatedGas,q.tx?.gas,q.tx?.gasLimit]){
+    if(candidate!=null){
+      try{swapGas=BigInt(candidate);break;}catch{}
+    }
+  }
+  // Live gas estimate is reliable for native sells and already-approved ERC-20s.
+  if(sellToken.toLowerCase()===NATIVE || currentAllowance>=BigInt(sellAmount)){
+    swapGas=await estimateTxGas(tx,taker,swapGas||180000n);
+  }
+  if(swapGas==null) swapGas=180000n;
+
+  const minBuy=q.minToAmount ? String(q.minToAmount) : minOut(BigInt(q.toAmount),slippageBps).toString();
+  const swaps=Array.isArray(q.swaps)?q.swaps:[];
+  const routeNames=swaps.map(x=>{
+    if(typeof x==="string") return x;
+    return x?.protocol||x?.dex||x?.name||x?.pool||null;
+  }).filter(Boolean);
+  const route=routeNames.length
+    ? [...new Set(routeNames)].slice(0,4).join(" → ")
+    : "NORDSTERN SIMULATED ROUTE";
+
+  const base={
+    provider:"nordstern",
+    label:"NORDSTERN DIRECT",
+    buyAmount:String(q.toAmount),
+    minBuyAmount:minBuy,
+    approvalSpender,
+    providerFeeUsd:0,
+    route,
+    transaction:tx,
+    complexity:swaps.length>1?"MULTI":"SMART"
+  };
+  return addGasMetrics(base,{
+    gasUnits:swapGas,approvalGasUnits:approvalGas,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount
+  });
+}
+
 async function getLifi({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice,ethUsd,buyInfo,sellInfo}){
   const p=new URLSearchParams({
     fromChain:String(CHAIN_ID),toChain:String(CHAIN_ID),
@@ -219,13 +332,8 @@ async function getLifi({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice
   }
 
   let swapGas=null;
-  // Prefer provider/native estimation when available, otherwise simulate.
-  if(q.transactionRequest?.gasLimit) {
-    try{swapGas=BigInt(q.transactionRequest.gasLimit);}catch{}
-  }
-  if(swapGas==null && q.transactionRequest?.gas){
-    try{swapGas=BigInt(q.transactionRequest.gas);}catch{}
-  }
+  if(q.transactionRequest?.gasLimit){try{swapGas=BigInt(q.transactionRequest.gasLimit);}catch{}}
+  if(swapGas==null && q.transactionRequest?.gas){try{swapGas=BigInt(q.transactionRequest.gas);}catch{}}
   if(swapGas==null) swapGas=await estimateTxGas(tx,taker,null);
 
   const steps=(q.includedSteps||[]).map(x=>x.tool).filter(Boolean);
@@ -239,10 +347,7 @@ async function getLifi({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice
     route:route || "LI.FI SMART ROUTE",transaction:tx,
     complexity:steps.length>1?"MULTI":"SMART"
   };
-  const withMetrics=addGasMetrics(base,{
-    gasUnits:swapGas,approvalGasUnits:approvalGas,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount
-  });
-  // LI.FI may provide a better gas USD estimate that includes chain-specific overhead.
+  const withMetrics=addGasMetrics(base,{gasUnits:swapGas,approvalGasUnits:approvalGas,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount});
   const providerGasUsd=sumUsd(q.estimate.gasCosts);
   if(providerGasUsd!=null){
     withMetrics.gasUsd=Math.max(withMetrics.gasUsd||0,providerGasUsd+(gasUsdFromUnits(approvalGas,gasPrice,ethUsd)||0));
@@ -275,7 +380,6 @@ async function quotePath(tokens,fees,amountIn){
   const decoded=decodeFunctionResult({abi:quoterAbi,functionName:"quoteExactInput",data:result});
   return {amountOut:BigInt(decoded[0]),gasEstimate:BigInt(decoded[3]),fees,tokens,path};
 }
-
 function buildUniTransaction(best,{sellToken,buyToken,sellAmount,taker,slippageBps}){
   const sellNative=sellToken.toLowerCase()===NATIVE;
   const buyNative=buyToken.toLowerCase()===NATIVE;
@@ -314,13 +418,11 @@ function buildUniTransaction(best,{sellToken,buyToken,sellAmount,taker,slippageB
     gas:null,gasPrice:null
   };
 }
-
 async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice,ethUsd,buyInfo,sellInfo}){
   const tokenIn=wrapped(sellToken), tokenOut=wrapped(buyToken);
   if(tokenIn.toLowerCase()===tokenOut.toLowerCase()) throw new Error("Wrapped route resolves to same token");
 
   const candidates=[];
-
   await Promise.all(FEES.map(async fee=>{
     try{
       const q=await quoteSingle(tokenIn,tokenOut,sellAmount,fee);
@@ -331,7 +433,6 @@ async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps
   const mids=[getAddress(WETH.toLowerCase()),getAddress(USDG.toLowerCase())].filter(m=>
     m.toLowerCase()!==tokenIn.toLowerCase() && m.toLowerCase()!==tokenOut.toLowerCase()
   );
-
   for(const mid of mids){
     const legs1=[];
     await Promise.all(FEES.map(async fee=>{
@@ -350,7 +451,6 @@ async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps
       }));
     }
   }
-
   if(!candidates.length) throw new Error("No direct Uniswap V3 route");
 
   let approvalGas=0n;
@@ -361,8 +461,6 @@ async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps
     approvalGas=await estimateApprovalGas(sellToken,taker,UNISWAP_SWAP_ROUTER_02,sellAmount);
   }
 
-  // Gas-aware selection INSIDE Uniswap: a 2-hop route only wins when the
-  // extra output is worth more than its additional gas.
   const scored=candidates.map(c=>{
     const gasUsd=gasUsdFromUnits(c.gasEstimate+approvalGas,gasPrice,ethUsd);
     const grossUsd=tokenAmountUsd(c.amountOut.toString(),buyInfo);
@@ -374,10 +472,9 @@ async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps
     if(a.amountOut!==b.amountOut) return a.amountOut>b.amountOut?-1:1;
     return a.fees.length-b.fees.length;
   });
+
   const best=scored[0];
   const tx=buildUniTransaction(best,{sellToken,buyToken,sellAmount,taker,slippageBps});
-
-  // If allowance already exists, try a live estimate for the exact calldata.
   let swapGas=best.gasEstimate;
   if(sellToken.toLowerCase()===NATIVE || currentAllowance>=BigInt(sellAmount)){
     const live=await estimateTxGas(tx,taker,best.gasEstimate);
@@ -399,9 +496,7 @@ async function getUniswapDirect({sellToken,buyToken,sellAmount,taker,slippageBps
     complexity:best.fees.length===1?"DIRECT":"2-HOP",
     meta:{version:"v3",feeTiers:best.fees,hopCount:best.fees.length}
   };
-  return addGasMetrics(base,{
-    gasUnits:swapGas,approvalGasUnits:approvalGas,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount
-  });
+  return addGasMetrics(base,{gasUnits:swapGas,approvalGasUnits:approvalGas,gasPrice,ethUsd,buyInfo,sellInfo,sellAmount});
 }
 
 module.exports = async function handler(req,res){
@@ -409,12 +504,23 @@ module.exports = async function handler(req,res){
   try{
     const {sellToken,buyToken,sellAmount,taker,provider="all"}=req.query||{};
     const slippageBps=Number(req.query?.slippageBps||50);
+
     if(!addressOk(sellToken)||!addressOk(buyToken)) return json(res,400,{error:"INVALID_TOKEN_ADDRESS"});
     if(sellToken.toLowerCase()===buyToken.toLowerCase()) return json(res,400,{error:"TOKENS_MUST_DIFFER"});
     if(!addressOk(taker)) return json(res,400,{error:"INVALID_TAKER"});
     try{ if(BigInt(sellAmount)<=0n) throw 0; }catch{return json(res,400,{error:"INVALID_SELL_AMOUNT"});}
     if(!Number.isInteger(slippageBps)||slippageBps<1||slippageBps>500) return json(res,400,{error:"INVALID_SLIPPAGE"});
-    if(!["all","lifi","uniswap"].includes(provider)) return json(res,400,{error:"INVALID_PROVIDER"});
+    if(!["all","wrap","nordstern","lifi","uniswap"].includes(provider)) return json(res,400,{error:"INVALID_PROVIDER"});
+
+    // HARD PORTAL GATE: no executable quote is returned unless the taker
+    // currently owns at least one DEAD PIXELS NFT.
+    const holderBalance=await deadPixelsBalance(taker);
+    if(holderBalance<1n){
+      return json(res,403,{
+        error:"DEAD_PIXELS_HOLDER_REQUIRED",
+        requirement:"HOLD_AT_LEAST_1_DEAD_PIXEL"
+      });
+    }
 
     const [gp,ethUsd,buyInfo,sellInfo]=await Promise.all([
       gasPriceWei(),ethPriceUsd(),tokenInfo(buyToken),tokenInfo(sellToken)
@@ -422,18 +528,25 @@ module.exports = async function handler(req,res){
     const args={sellToken,buyToken,sellAmount,taker,slippageBps,gasPrice:gp,ethUsd,buyInfo,sellInfo};
 
     const jobs=[];
-    if(provider==="all"||provider==="lifi") jobs.push(["LI.FI",()=>getLifi(args)]);
-    if(provider==="all"||provider==="uniswap") jobs.push(["UNISWAP",()=>getUniswapDirect(args)]);
+    const isWrapPair=
+      (sellToken.toLowerCase()===NATIVE && buyToken.toLowerCase()===WETH.toLowerCase()) ||
+      (sellToken.toLowerCase()===WETH.toLowerCase() && buyToken.toLowerCase()===NATIVE);
+
+    if((provider==="all"||provider==="wrap") && isWrapPair){
+      jobs.push(["DIRECT WRAP",()=>getDirectWrap(args)]);
+    }
+
+    if(!isWrapPair){
+      if(provider==="all"||provider==="nordstern") jobs.push(["NORDSTERN",()=>getNordstern(args)]);
+      if(provider==="all"||provider==="lifi") jobs.push(["LI.FI",()=>getLifi(args)]);
+      if(provider==="all"||provider==="uniswap") jobs.push(["UNISWAP",()=>getUniswapDirect(args)]);
+    }
 
     const settled=await Promise.all(jobs.map(async ([name,fn])=>{
       try{return {ok:true,value:await fn()}}catch(e){return {ok:false,provider:name,error:e.message||String(e)}}
     }));
-
     const quotes=settled.filter(x=>x.ok).map(x=>x.value);
 
-    // Primary ranking: best NET USD after gas/provider fees.
-    // Fallback when reliable prices aren't available: highest raw token output,
-    // then lower gas units as tie-breaker.
     quotes.sort((a,b)=>{
       if(a.netUsd!=null && b.netUsd!=null && a.netUsd!==b.netUsd) return a.netUsd>b.netUsd?-1:1;
       const A=BigInt(a.buyAmount),B=BigInt(b.buyAmount);
@@ -448,14 +561,17 @@ module.exports = async function handler(req,res){
 
     return json(res,200,{
       chainId:CHAIN_ID,
+      holderBalance:holderBalance.toString(),
       protocolFeeBps:0,
       ranking:(quotes[0]?.netUsd!=null)?"best net value after estimated gas":"highest expected token output",
       gasPriceWei:gp?gp.toString():null,
       ethPriceUsd:ethUsd,
       sellValueUsd:sellUsd,
       providers:[
-        {name:"LI.FI",enabled:true},
-        {name:"UNISWAP DIRECT",enabled:true,version:"V3"}
+        {name:"DIRECT WRAP",enabled:true,for:"ETH/WETH"},
+        {name:"NORDSTERN DIRECT",enabled:true},
+        {name:"UNISWAP DIRECT",enabled:true,version:"V3"},
+        {name:"LI.FI",enabled:true}
       ],
       quotes,errors,generatedAt:new Date().toISOString(),
       uniswap:{
