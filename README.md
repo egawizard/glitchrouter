@@ -244,3 +244,25 @@ Before announcing production execution:
 9. keep the 0% protocol fee claim limited to the DEAD PIXELS protocol fee — external pools/routes may still have their own liquidity/provider costs.
 
 Stock Tokens may be subject to issuer and jurisdiction restrictions. The portal displays an access notice but does not itself determine legal eligibility.
+
+
+## V3.5.1 — Vercel-safe packaging
+
+This build reduces the number of standalone Vercel Functions by merging:
+
+- stock registry
+- market scan
+- stock detail
+- stock execution analysis
+
+into one `/api/stocks?action=...` function.
+
+The application behavior is unchanged from the user's perspective.
+
+Node is pinned to:
+
+```text
+22.x
+```
+
+instead of the floating `>=18` engine range.

@@ -1,9 +1,9 @@
 {
   "name": "dead-pixels-portal-v35",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   },
   "dependencies": {
     "viem": "^2.37.6"

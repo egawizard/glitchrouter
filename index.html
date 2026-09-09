@@ -999,7 +999,7 @@ a{color:inherit}
 
   async function loadStockRegistry(){
     try{
-      const j=await api("/api/stocks");stockRegistry=j.assets||[];
+      const j=await api("/api/stocks?action=registry");stockRegistry=j.assets||[];
       qid("registryCount").textContent=`${stockRegistry.length} ASSETS`;
       const opts=stockRegistry.map(optionHtml).join("");
       ["stockAnalyzeSymbol","rotateSell","rotateBuy","orderStock"].forEach(id=>{const e=qid(id);if(e)e.innerHTML=opts});
@@ -1025,7 +1025,7 @@ a{color:inherit}
     symbols=[...new Set(symbols)].slice(0,12);if(!symbols.length){list.innerHTML='<div class="result-empty">NO STOCK TOKEN MATCH.</div>';return;}
     status.textContent="SCANNING MARKET...";list.innerHTML='<div class="loading-bar"><i></i></div>';
     try{
-      const j=await api(`/api/stock-scan?symbols=${encodeURIComponent(symbols.join(","))}`);stockScanItems=j.items||[];renderScanner();status.textContent=`${stockScanItems.length} MARKETS // LIVE`;
+      const j=await api(`/api/stocks?action=scan&symbols=${encodeURIComponent(symbols.join(","))}`);stockScanItems=j.items||[];renderScanner();status.textContent=`${stockScanItems.length} MARKETS // LIVE`;
     }catch(e){status.textContent="SCAN FAILED";list.innerHTML=`<div class="result-empty">${escapeHtml(e.message||e)}</div>`;}
   }
   function renderScanner(){
@@ -1045,7 +1045,7 @@ a{color:inherit}
     const amt=num(qid("stockAnalyzeAmount")?.value);if(!(amt>0))return;
     state.textContent="ANALYZING...";box.innerHTML='<div class="loading-bar"><i></i></div>';btn.disabled=true;
     try{
-      const j=await api(`/api/stock-execution?symbol=${encodeURIComponent(symbol)}&wallet=${encodeURIComponent(account)}&side=buy&amount=${encodeURIComponent(amt)}`);selectedStockAnalysis=j;box.innerHTML=scoreMarkup(j);
+      const j=await api(`/api/stocks?action=execution&symbol=${encodeURIComponent(symbol)}&wallet=${encodeURIComponent(account)}&side=buy&amount=${encodeURIComponent(amt)}`);selectedStockAnalysis=j;box.innerHTML=scoreMarkup(j);
       const max=num(qid("stockShieldMax")?.value,.25),pass=num(j.execution?.adverseDeviationPct,999)<=max&&!j.fair?.isTradingHalt;
       box.insertAdjacentHTML("beforeend",`<div class="shield ${pass?"pass":"block"}"><div class="shield-head"><span>FAIR VALUE SHIELD</span><b>${pass?"PASS // EXECUTION ALLOWED":"BLOCKED // DEVIATION TOO HIGH"}</b></div><small>MAX ${max.toFixed(3)}% // CURRENT ${num(j.execution?.adverseDeviationPct).toFixed(3)}%</small></div>`);
       btn.disabled=!pass;state.textContent=`${j.symbol} // ${j.glitchScore?.verdict||"READY"}`;
@@ -1070,7 +1070,7 @@ a{color:inherit}
     if(!account||!holderState.eligible){box.innerHTML='<div class="result-empty">CONNECT A DEAD PIXELS HOLDER WALLET TO ANALYZE EXECUTION.</div>';return;}
     box.innerHTML='<div class="loading-bar"><i></i></div>';btn.disabled=true;
     try{
-      const [m,q]=await Promise.all([api(`/api/stock-scan?symbols=${encodeURIComponent(a+","+b)}`),api(`/api/quote?sellToken=${encodeURIComponent(stockToken(a).address)}&buyToken=${encodeURIComponent(stockToken(b).address)}&sellAmount=${encodeURIComponent(parseUnits(String(amount),18))}&taker=${encodeURIComponent(account)}&slippageBps=50&provider=all`)]);
+      const [m,q]=await Promise.all([api(`/api/stocks?action=scan&symbols=${encodeURIComponent(a+","+b)}`),api(`/api/quote?sellToken=${encodeURIComponent(stockToken(a).address)}&buyToken=${encodeURIComponent(stockToken(b).address)}&sellAmount=${encodeURIComponent(parseUnits(String(amount),18))}&taker=${encodeURIComponent(account)}&slippageBps=50&provider=all`)]);
       const ma=(m.items||[]).find(x=>x.symbol===a),mb=(m.items||[]).find(x=>x.symbol===b),best=(q.quotes||[])[0];if(!ma||!mb||!best)throw new Error("NO EXECUTABLE ROTATION");
       const expected=amount*ma.market.fairValue/mb.market.fairValue,actual=num(formatUnits(best.buyAmount,18)),shortfall=(1-actual/expected)*100,adverse=Math.max(0,shortfall),gas=num(best.gasUsd),notional=amount*ma.market.fairValue;
       const score=Math.max(0,Math.min(100,Math.round(100-adverse*42-(notional>0?gas/notional*100*25:0))));rotateAnalysis={a,b,amount,expected,actual,shortfall,adverse,gas,score,best};
@@ -1098,7 +1098,7 @@ a{color:inherit}
   async function rebalancePortfolio(){
     try{
       validPortfolio();if(!account)throw new Error("CONNECT WALLET");qid("portfolioStatus").textContent="SCANNING WALLET BALANCES + FAIR VALUES...";
-      const syms=portfolioRowsState.map(x=>x.symbol);const m=await api(`/api/stock-scan?symbols=${encodeURIComponent(syms.join(","))}`);const map=new Map((m.items||[]).map(x=>[x.symbol,x]));
+      const syms=portfolioRowsState.map(x=>x.symbol);const m=await api(`/api/stocks?action=scan&symbols=${encodeURIComponent(syms.join(","))}`);const map=new Map((m.items||[]).map(x=>[x.symbol,x]));
       const vals=[];for(const r of portfolioRowsState){const t=stockToken(r.symbol),bal=await arbitraryBalance(t),price=map.get(r.symbol)?.market?.fairValue;if(!(price>0))throw new Error(`NO FAIR VALUE FOR ${r.symbol}`);vals.push({...r,t,balance:bal,price,value:bal*price});}
       const total=vals.reduce((a,x)=>a+x.value,0);if(!(total>0))throw new Error("NO SELECTED STOCK TOKEN BALANCE FOUND");
       const sellers=vals.map(x=>({...x,delta:x.value-total*x.weight/100})).filter(x=>x.delta>1).sort((a,b)=>b.delta-a.delta);const buyers=vals.map(x=>({...x,need:total*x.weight/100-x.value})).filter(x=>x.need>1).sort((a,b)=>b.need-a.need);
@@ -1123,7 +1123,7 @@ a{color:inherit}
     el.querySelectorAll("[data-order-load]").forEach(b=>b.addEventListener("click",()=>{const o=executionOrders.find(x=>x.id===b.dataset.orderLoad);if(!o)return;const stock=stockToken(o.symbol);loadIntoRouter(o.side==="buy"?TOKENS.USDG:stock,o.side==="buy"?stock:TOKENS.USDG,o.amount);}));
   }
   async function checkOneOrder(o,manual=false){
-    if(!o||!account||!holderState.eligible)return;try{o.state="CHECKING";if(manual)renderOrders();const j=await api(`/api/stock-execution?symbol=${encodeURIComponent(o.symbol)}&wallet=${encodeURIComponent(account)}&side=${o.side}&amount=${encodeURIComponent(o.amount)}`);o.last=j;o.lastChecked=Date.now();o.state=orderReady(o,j)?"READY":"WAITING";saveOrders();if(o.state==="READY")qid("orderStatus").textContent=`READY // ${o.side.toUpperCase()} ${o.symbol} CONDITIONS MET // WALLET CONFIRMATION REQUIRED`;}
+    if(!o||!account||!holderState.eligible)return;try{o.state="CHECKING";if(manual)renderOrders();const j=await api(`/api/stocks?action=execution&symbol=${encodeURIComponent(o.symbol)}&wallet=${encodeURIComponent(account)}&side=${o.side}&amount=${encodeURIComponent(o.amount)}`);o.last=j;o.lastChecked=Date.now();o.state=orderReady(o,j)?"READY":"WAITING";saveOrders();if(o.state==="READY")qid("orderStatus").textContent=`READY // ${o.side.toUpperCase()} ${o.symbol} CONDITIONS MET // WALLET CONFIRMATION REQUIRED`;}
     catch(e){o.state="ERROR";o.error=e.message||String(e);saveOrders();}}
   async function checkExecutionOrders(){if(!account||!holderState.eligible||!executionOrders.length)return;for(const o of executionOrders.slice(0,6))await checkOneOrder(o,false);}
   function armOrder(){
