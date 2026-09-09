@@ -128,7 +128,7 @@ a{color:inherit}
   <section class="hero">
     <div class="kicker">PORTAL MODULE 01 // EXECUTION LAYER</div>
     <h1>GLITCH<br><em>ROUTER</em></h1>
-    <p>One interface. Every routable token on Robinhood Chain. Search the live token catalog or paste any ERC-20 contract, compare executable quotes, and send the winning route directly from your wallet.</p>
+    <p>One interface. Every routable token on Robinhood Chain. GLITCH ROUTER compares LI.FI against direct Uniswap liquidity and sends the better executable route directly from your wallet.</p>
     <div class="hero-grid">
       <div><small>PROTOCOL FEE</small><b class="protocol-zero">0.00%</b></div>
       <div><small>CUSTODY</small><b>NON-CUSTODIAL</b></div>
@@ -198,7 +198,7 @@ a{color:inherit}
 
       <div class="details">
         <div><small>PROTOCOL FEE</small><b>0.00%</b></div>
-        <div><small>ROUTING</small><b id="routingLabel">MULTI-SOURCE</b></div>
+        <div><small>ROUTING</small><b id="routingLabel">LI.FI + UNISWAP</b></div>
         <div><small>EXECUTION</small><b>YOUR WALLET</b></div>
       </div>
     </div>
@@ -473,7 +473,7 @@ a{color:inherit}
     if(!account || !els.sellAmount.value || Number(els.sellAmount.value)<=0){updateAction();return;}
     try{
       setStatus("SCANNING ROUTES // REQUESTING EXECUTABLE QUOTES...");
-      els.quotePanel.innerHTML='<div class="empty">SCANNING LIQUIDITY...</div>';
+      els.quotePanel.innerHTML='<div class="empty">SCANNING LI.FI + UNISWAP...</div>';
       const {data,buy}=await fetchQuotes("all");
       renderQuotes(data,buy);
       const enabled=(data.providers||[]).filter(x=>x.enabled).map(x=>x.name).join(" + ");

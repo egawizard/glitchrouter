@@ -1,65 +1,64 @@
-# DEAD PIXELS // GLITCH ROUTER V2 — ALL TOKENS
+# DEAD PIXELS // GLITCH ROUTER V3
+## LI.FI + DIRECT UNISWAP
 
-Non-custodial Robinhood Chain (chain ID 4663) swap UI for `portal.deadpixelslabs.com`.
+Robinhood Chain mainnet, chain ID `4663`.
 
-## V2 behavior
+### Providers
 
-- Loads the live Robinhood Chain token catalog from LI.FI.
-- Search by token symbol, name, or contract.
-- Any ERC-20 can still be pasted manually by contract address if it is missing from the catalog.
-- A token appearing in the selector does **not** guarantee liquidity; execution still requires a valid route from a provider.
+1. **LI.FI**
+2. **Direct Uniswap V3**
 
-## Routing behavior
+No 0x API is used in this build.
 
-- No DEAD PIXELS / GLITCH smart contract is used for routing.
-- User funds go from the user's wallet directly to the executable router returned by the selected provider.
-- Protocol fee in this build: **0 bps**.
-- LI.FI is enabled by default and does not require an API key for basic API usage.
-- 0x comparison is automatically enabled when `ZEROX_API_KEY` is added in Vercel.
-- ERC-20 approvals are exact-to-trade amounts and use only the approval spender returned by the provider.
-- The quote is refreshed after approval and immediately before execution.
-- Native ETH needs no approval.
+The direct Uniswap engine reads the official Robinhood Chain Uniswap V3 Quoter and builds a transaction directly for SwapRouter02. It searches:
 
-## Vercel environment variables
+- direct token A → token B pools
+- 0.01%, 0.05%, 0.30%, and 1.00% V3 fee tiers
+- optional two-hop routes through WETH
+- optional two-hop routes through USDG
 
-Optional but recommended:
+The best LI.FI quote and best direct Uniswap quote are shown side by side. The highest expected token output is selected by default.
+
+### Official Uniswap addresses used
+
+- V3 Quoter: `0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7`
+- SwapRouter02: `0xcaf681a66d020601342297493863e78c959e5cb2`
+- WETH: `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73`
+
+### Environment variables
+
+No API key is required for direct Uniswap.
+
+Optional:
 
 ```text
-ZEROX_API_KEY=...
-LIFI_API_KEY=...
+LIFI_API_KEY=
 RH_RPC_URL=https://rpc.mainnet.chain.robinhood.com/
 ```
 
-`ZEROX_API_KEY` turns the page into a live LI.FI-vs-0x meta-comparison.
-`LIFI_API_KEY` is optional; LI.FI basic API access works without authentication, but an API key can provide higher rate limits.
-`RH_RPC_URL` is optional. If omitted, the official Robinhood Chain RPC above is used.
+For production, use a dedicated Robinhood Chain RPC in `RH_RPC_URL` because the direct Uniswap route scanner performs multiple onchain quote calls.
 
-Do NOT put API keys in `index.html`. Keep them as Vercel environment variables.
+### Security / execution
 
-## Deploy
+- DEAD PIXELS adds `0 bps` protocol fee.
+- No DEAD PIXELS custody/router contract sits in the asset path.
+- ERC-20 approval is exact-to-trade, not unlimited.
+- LI.FI trades approve only the spender returned by LI.FI.
+- Direct Uniswap V3 trades approve only official SwapRouter02.
+- Quotes are refreshed after approval before execution.
+- `amountOutMinimum` is computed from the selected slippage setting.
+- Native ETH routes are wrapped/unwrapped by the official Uniswap router flow.
 
-Upload the project directory/ZIP to the Vercel project behind `portal.deadpixelslabs.com`.
+### V4
 
-After deployment, check:
+This build intentionally executes direct Uniswap via V3 first. LI.FI may independently choose V4 liquidity inside its own route. Direct V4 execution can be added after V3 has been tested with small live swaps; V4 uses the Universal Router/Permit2 execution model and should not be improvised into the first production build.
 
-- `/api/health`
-- Connect wallet
-- Make sure wallet is on Robinhood Chain
-- Test a tiny amount first
-- Verify approval spender + transaction destination in the wallet before confirming
+### Test
 
-## Pinned token shortcuts
-
-- ETH native
-- WETH: `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73`
-- USDG: `0x5fc5360d0400a0fd4f2af552add042d716f1d168`
-- GLITCH: `0xaeca11ad61d76f7c2d6b1100d3ca9066fbdb8459`
-- NVDA / NVIDIA Robinhood Token: `0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec`
-
-Arbitrary ERC-20 contracts can be entered as CUSTOM TOKEN.
-
-## Important
-
-"0% protocol fee" means this app adds no DEAD PIXELS fee. Underlying DEX, router, LP, gas, provider, token tax, or RWA-related costs can still apply.
-
-NVDA is a tokenized real-world asset. Availability and restrictions may depend on jurisdiction and issuer/provider rules.
+1. Deploy to a Vercel preview URL first.
+2. Open `/api/health`.
+3. Connect a Robinhood Chain wallet.
+4. Test a tiny route with known liquidity.
+5. Confirm the UI shows both LI.FI and UNISWAP DIRECT when both have liquidity.
+6. Inspect the wallet transaction destination before confirming.
+7. Only then move it to `portal.deadpixelslabs.com`.
