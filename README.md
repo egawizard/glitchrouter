@@ -1,41 +1,59 @@
-# GLITCH ROUTER V4 — GASLESS HOLDERS
+# DEAD PIXELS // GLITCH ROUTER V4 — GAS OPTIMIZED
 
-**HOLD DEAD PIXELS. SWAP GASLESS.**
+No Paymaster. No gas sponsorship. User pays the actual network gas.
 
-This build keeps V3 routing:
+The goal of V4 is different:
+
+**choose the route that leaves the user with the most value AFTER estimated gas.**
+
+## Providers
 
 - LI.FI
 - Direct Uniswap V3
-- all routable Robinhood Chain ERC-20s / custom contract input
 - 0 bps DEAD PIXELS protocol fee
 
-and adds a holder-gated Alchemy Gas Manager execution path.
+## Gas optimizations
 
-## What changed
-
-A connected wallet holding at least **1 DEAD PIXEL** is marked gasless-eligible.
-
-DEAD PIXELS NFT:
-`0x27390fe7ae676fbfdb632e61cd4019996b07892c`
-
-Gasless execution uses **EIP-7702** so the user's existing EOA address remains the account address. Their current token/NFT balances do not have to be moved into a separate smart-account address.
-
-For ERC-20 swaps, the app can batch:
-
-1. exact ERC-20 approval (only when current allowance is insufficient)
-2. swap
-
-into one sponsored Wallet API call.
-
-If gasless execution is unavailable or the user's wallet cannot sign the required authorization, the UI does **not** silently fall back to a gas-paid transaction. The user must switch `GASLESS OFF` before using the normal V3 flow.
-
-## Required Vercel environment variables
+### 1. Best Net Output
+When live USD pricing is available, routes are ranked by:
 
 ```text
-ALCHEMY_API_KEY=
-ALCHEMY_GAS_POLICY_ID=
-GLITCH_GASLESS_SIGNING_SECRET=
+gross token value
+- estimated network gas
+- provider fee (when reported)
+= estimated net value
 ```
+
+This means a route with slightly lower token output can beat a more expensive route if it uses materially less gas.
+
+### 2. Direct vs two-hop Uniswap
+The direct Uniswap scanner still checks:
+
+- token A → token B
+- token A → WETH → token B
+- token A → USDG → token B
+
+But V4 no longer automatically picks the route with the highest raw token output.
+
+It evaluates the Quoter gas estimate for each candidate and selects the best estimated net result when token pricing is available.
+
+### 3. Approval gas included
+For ERC-20 sells, V4 checks current allowance.
+
+If a new approval is required, its estimated gas is added to route cost before ranking.
+
+### 4. High Gas Impact warning
+The UI compares estimated gas cost against the approximate USD size of the input trade.
+
+- >= 5%: warning
+- >= 20%: high gas impact warning
+
+The swap is not silently blocked; the user can decide.
+
+### 5. No Paymaster
+There are no Alchemy Gas Manager dependencies or sponsorship bills in this build.
+
+## Environment
 
 Optional:
 
@@ -44,99 +62,25 @@ LIFI_API_KEY=
 RH_RPC_URL=https://rpc.mainnet.chain.robinhood.com/
 ```
 
-Never place `GLITCH_GASLESS_SIGNING_SECRET` in frontend code.
+For production, a dedicated RPC is recommended because gas-aware direct Uniswap scanning performs multiple `eth_call` / gas-estimation requests.
 
-## Generate GLITCH_GASLESS_SIGNING_SECRET on Windows PowerShell
+## Important caveat
 
-```powershell
-$b=New-Object byte[] 32;$r=[Security.Cryptography.RandomNumberGenerator]::Create();$r.GetBytes($b);[BitConverter]::ToString($b).Replace('-','');$r.Dispose()
-```
+Gas values are estimates. Final wallet/network cost can change between quote and inclusion.
 
-Put the result directly in Vercel. Do not post it publicly.
+When reliable token USD prices are unavailable, V4 falls back to:
 
-## Alchemy setup
+1. highest expected token output
+2. lower estimated gas as a tie-breaker
 
-Create an Alchemy app with **Robinhood Chain mainnet** enabled, then create a Gas Sponsorship policy for that app.
+## Test
 
-Configure the policy Custom Rules webhook as:
+Deploy to Vercel preview first.
 
-```text
-https://portal.deadpixelslabs.com/api/paymaster-webhook
-```
-
-Set:
-
-```text
-approveOnFailure = false
-```
-
-Strongly recommended policy limits for the first live beta:
-
-```text
-Max sponsored transactions per sender: 5
-Per-transaction sponsorship cap: keep very small
-Global policy spend cap: set a hard daily / campaign budget
-```
-
-Start stricter and raise limits after observing real usage.
-
-Mainnet gas sponsorship can require an Alchemy PAYG/Enterprise billing setup. The user pays $0 gas, but the sponsorship cost is paid by the Gas Manager policy owner.
-
-## Security model in this beta
-
-The portal backend issues a short-lived signed gasless ticket only when:
-
-- the wallet holds >= 1 DEAD PIXEL
-- the swap uses LI.FI or the official direct Uniswap router
-- call shape is swap-only, or exact ERC-20 approve + swap
-- approval spender is a known execution router
-
-The Alchemy custom-rule webhook verifies:
-
-- chain ID = 4663
-- correct Gas Manager policy
-- ticket HMAC
-- ticket expiration
-- UserOperation sender = holder wallet
-- current NFT balance >= 1
-- intended route target and exact swap payload are embedded in UserOperation calldata
-
-Alchemy dashboard spend/transaction caps are still mandatory defense-in-depth.
-
-## API checks after deployment
+Check:
 
 ```text
 /api/health
-/api/holder?wallet=0x...
 ```
 
-Expected `/api/health` after env setup:
-
-```json
-{
-  "ok": true,
-  "gasless": {
-    "configured": true,
-    "missing": []
-  }
-}
-```
-
-## Wallet compatibility
-
-The gasless path depends on EIP-7702 authorization support from the connected wallet. OKX Wallet has publicly announced EIP-7702 support. If a wallet/provider rejects the authorization flow, use the normal V3 gas-paid mode instead.
-
-## Test procedure
-
-1. Deploy to a Vercel preview first.
-2. Add the three required environment variables.
-3. Confirm `/api/health` shows gasless configured.
-4. Create/update the Alchemy Gas Manager policy and custom-rule webhook.
-5. Connect a wallet holding DEAD PIXELS.
-6. Confirm the page says `GAS SPONSORED`.
-7. Test a tiny swap.
-8. Check the wallet shows a sponsored / smart-account authorization flow.
-9. Confirm the resulting transaction on Robinhood Chain explorer.
-10. Only then promote the build to `portal.deadpixelslabs.com`.
-
-No private key, seed phrase, or bot secret is ever required by the portal.
+Then compare a tiny trade and a normal-sized trade. A tiny trade should show a HIGH GAS IMPACT warning when network cost is disproportionately large.

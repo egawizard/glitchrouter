@@ -60,24 +60,6 @@ a{color:inherit}
 .mini.active{border-color:var(--acid);color:var(--acid)}
 .wallet-btn{white-space:nowrap;background:#111}
 .wallet-btn.connected{color:var(--acid);border-color:#536c19}
-
-.gasless-panel{
- display:flex;align-items:center;justify-content:space-between;gap:14px;
- padding:12px 13px;margin-bottom:13px;border:1px solid #35420f;
- background:linear-gradient(90deg,rgba(195,255,35,.08),rgba(0,0,0,.22));
- position:relative;overflow:hidden
-}
-.gasless-panel:after{content:"";position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(90deg,transparent 0 47px,rgba(195,255,35,.025) 47px 48px)}
-.gasless-panel small{display:block;color:#777b68;font-size:7px;letter-spacing:.13em;margin-bottom:4px}
-.gasless-panel b{display:block;font-family:Arial Black,Arial,sans-serif;font-size:13px;letter-spacing:-.02em}
-.gasless-panel b em{font-style:normal;color:var(--acid)}
-.gasless-panel span{display:block;color:#7d7d75;font-size:8px;margin-top:5px}
-.gasless-panel.eligible{border-color:var(--acid);box-shadow:0 0 20px rgba(195,255,35,.06) inset}
-.gasless-panel.eligible span{color:var(--acid)}
-.gasless-toggle{position:relative;z-index:2;white-space:nowrap;border:1px solid #51514a;background:#080808;color:#777;padding:9px 10px;font-size:8px;font-weight:700}
-.gasless-toggle.on{border-color:var(--acid);background:var(--acid);color:#050505}
-.gasless-toggle:disabled{opacity:.45;cursor:not-allowed}
-
 .tokenbox{border:1px solid #343431;background:#050505;padding:14px;margin-top:8px;transition:border-color .15s}
 .tokenbox:focus-within{border-color:#62625b}
 .tokenbox-head{display:flex;justify-content:space-between;align-items:center;color:#77776f;font-size:9px;letter-spacing:.12em;text-transform:uppercase;margin-bottom:8px}
@@ -146,10 +128,10 @@ a{color:inherit}
   <section class="hero">
     <div class="kicker">PORTAL MODULE 01 // EXECUTION LAYER</div>
     <h1>GLITCH<br><em>ROUTER</em></h1>
-    <p>One interface. Every routable token on Robinhood Chain. Hold at least one DEAD PIXEL and eligible swaps can be sponsored by the Portal Paymaster.</p>
+    <p>One interface. Every routable token on Robinhood Chain. GLITCH ROUTER compares LI.FI against direct Uniswap liquidity and sends the better executable route directly from your wallet.</p>
     <div class="hero-grid">
       <div><small>PROTOCOL FEE</small><b class="protocol-zero">0.00%</b></div>
-      <div><small>HOLDER UTILITY</small><b class="protocol-zero">GASLESS*</b></div>
+      <div><small>CUSTODY</small><b>NON-CUSTODIAL</b></div>
       <div><small>NETWORK</small><b>ROBINHOOD CHAIN</b></div>
     </div>
   </section>
@@ -167,15 +149,6 @@ a{color:inherit}
           <button class="mini" data-pair="WETH,USDG">WETH / USDG</button>
         </div>
         <button id="walletBtn" class="wallet-btn">CONNECT WALLET</button>
-      </div>
-
-      <div id="gaslessPanel" class="gasless-panel">
-        <div>
-          <small>DEAD PIXELS HOLDER UTILITY</small>
-          <b>HOLD DEAD PIXELS. <em>SWAP GASLESS.</em></b>
-          <span id="gaslessDetail">CONNECT WALLET TO CHECK ELIGIBILITY</span>
-        </div>
-        <button id="gaslessToggle" class="gasless-toggle" disabled>GASLESS ON</button>
       </div>
 
       <div class="tokenbox">
@@ -234,7 +207,6 @@ a{color:inherit}
 
 <div class="footerline"><span>ERROR MAKES US UNIQUE.</span><span>PORTAL.DEADPIXELSLABS.COM // BETA</span></div>
 
-<script type="module" src="/src/gasless.js"></script>
 <script>
 (() => {
   "use strict";
@@ -254,7 +226,7 @@ a{color:inherit}
 
   const $ = id => document.getElementById(id);
   const els = {
-    walletBtn:$("walletBtn"), gaslessPanel:$("gaslessPanel"), gaslessDetail:$("gaslessDetail"), gaslessToggle:$("gaslessToggle"), sellAmount:$("sellAmount"), sellToken:$("sellToken"), buyToken:$("buyToken"),
+    walletBtn:$("walletBtn"), sellAmount:$("sellAmount"), sellToken:$("sellToken"), buyToken:$("buyToken"),
     buyAmount:$("buyAmount"), slippage:$("slippage"), quotePanel:$("quotePanel"), actionBtn:$("actionBtn"),
     status:$("statusLog"), maxBtn:$("maxBtn"), reverseBtn:$("reverseBtn"), rwa:$("rwaNotice"),
     sellCustomWrap:$("sellCustomWrap"), buyCustomWrap:$("buyCustomWrap"),
@@ -264,7 +236,6 @@ a{color:inherit}
   };
 
   let account = null, quotes = [], selectedQuote = null, quoteTimer = null;
-  let holderInfo = null, gaslessEnabled = true, gaslessConfig = null;
   let customSell = null, customBuy = null, quoteAbort = null;
   let tokenCatalog = [];
 
@@ -351,97 +322,6 @@ a{color:inherit}
     return j;
   }
 
-  async function refreshGaslessEligibility(){
-    if(!account){
-      holderInfo=null;
-      els.gaslessPanel.classList.remove("eligible");
-      els.gaslessDetail.textContent="CONNECT WALLET TO CHECK ELIGIBILITY";
-      els.gaslessToggle.disabled=true;
-      els.gaslessToggle.classList.remove("on");
-      return;
-    }
-    try{
-      if(!window.glitchGasless){
-        els.gaslessDetail.textContent="LOADING PAYMASTER MODULE...";
-        await new Promise((resolve)=>window.addEventListener("glitch-gasless-ready",resolve,{once:true}));
-      }
-      gaslessConfig=await window.glitchGasless.loadConfig();
-      holderInfo=await window.glitchGasless.holderStatus(account);
-      if(holderInfo.eligible && gaslessConfig.enabled){
-        els.gaslessPanel.classList.add("eligible");
-        els.gaslessDetail.textContent=`ELIGIBLE // ${holderInfo.balance} DEAD PIXELS DETECTED // GAS SPONSORED`;
-        els.gaslessToggle.disabled=false;
-        els.gaslessToggle.classList.toggle("on",gaslessEnabled);
-      }else if(holderInfo.eligible){
-        els.gaslessPanel.classList.add("eligible");
-        els.gaslessDetail.textContent=`HOLDER DETECTED // PAYMASTER SETUP NOT ACTIVE YET`;
-        els.gaslessToggle.disabled=true;
-        els.gaslessToggle.classList.remove("on");
-      }else{
-        els.gaslessPanel.classList.remove("eligible");
-        els.gaslessDetail.textContent="1+ DEAD PIXEL REQUIRED FOR GASLESS SWAPS";
-        els.gaslessToggle.disabled=true;
-        els.gaslessToggle.classList.remove("on");
-      }
-    }catch(e){
-      els.gaslessPanel.classList.remove("eligible");
-      els.gaslessDetail.textContent=`GASLESS CHECK ERROR // ${e.message}`;
-      els.gaslessToggle.disabled=true;
-      els.gaslessToggle.classList.remove("on");
-    }
-  }
-
-  function approvalData(spender,amount){
-    return "0x095ea7b3"+padAddress(spender)+toHex32(amount);
-  }
-
-  async function executeGasless(){
-    await ensureChain();
-    const sell=await currentToken("sell");
-    const provider=selectedQuote.provider;
-    const amount=parseUnits(els.sellAmount.value,sell.decimals);
-
-    // Refresh selected provider immediately before sponsored execution.
-    setStatus(`GASLESS // REFRESHING ${provider.toUpperCase()} QUOTE...`);
-    const fresh=await fetchQuotes(provider);
-    const q=(fresh.data.quotes||[])[0];
-    if(!q||!q.transaction||!addrOk(q.transaction.to))throw new Error("NO FRESH EXECUTABLE TRANSACTION");
-
-    const calls=[];
-    if(!sell.native && q.approvalSpender){
-      const a=await allowance(sell,q.approvalSpender);
-      if(a<BigInt(amount)){
-        calls.push({
-          to:sell.address,
-          data:approvalData(q.approvalSpender,amount),
-          value:"0x0"
-        });
-      }
-    }
-    calls.push({
-      to:q.transaction.to,
-      data:q.transaction.data||"0x",
-      value:q.transaction.value||"0x0"
-    });
-
-    const out=await window.glitchGasless.sendSponsored({
-      owner:account,
-      provider,
-      calls,
-      onStatus:(m)=>setStatus(m)
-    });
-
-    const hash=out.txHash;
-    if(hash){
-      els.status.innerHTML=`GASLESS SWAP CONFIRMED // <a href="${EXPLORER}/tx/${hash}" target="_blank" rel="noopener">${short(hash)} ↗</a>`;
-      els.status.className="statuslog ok";
-    }else{
-      setStatus("GASLESS SWAP CONFIRMED // HOLDER PAID $0 NETWORK GAS","ok");
-    }
-    await updateBalance();
-    scheduleQuote(500);
-  }
-
   async function resolveKnownToken(key){
     const t={...TOKENS[key]};
     if(t.native) return t;
@@ -517,7 +397,6 @@ a{color:inherit}
       els.walletBtn.textContent=short(account); els.walletBtn.classList.add("connected");
       setStatus("WALLET CONNECTED // ROBINHOOD CHAIN","ok");
       await updateBalance();
-      await refreshGaslessEligibility();
       updateAction();
       scheduleQuote(150);
     }catch(e){ setStatus(`WALLET ERROR // ${e.message}`,"err"); }
@@ -642,16 +521,6 @@ a{color:inherit}
     if(!selectedQuote){ await getQuote(); if(!selectedQuote)return; }
     els.actionBtn.disabled=true;
     try{
-      if(gaslessEnabled && holderInfo?.eligible && gaslessConfig?.enabled){
-        try{
-          await executeGasless();
-          return;
-        }catch(e){
-          const msg=String(e.message||e);
-          setStatus(`GASLESS ERROR // ${msg} // TURN GASLESS OFF TO USE NORMAL SWAP`,"err");
-          return;
-        }
-      }
       await ensureChain();
       const sell=await currentToken("sell");
       const provider=selectedQuote.provider;
@@ -698,9 +567,7 @@ a{color:inherit}
     if(!account){els.actionBtn.textContent="CONNECT WALLET";els.actionBtn.disabled=false;return;}
     if(!els.sellAmount.value||Number(els.sellAmount.value)<=0){els.actionBtn.textContent="ENTER AMOUNT";els.actionBtn.disabled=true;return;}
     if(!selectedQuote){els.actionBtn.textContent="GET BEST QUOTE";els.actionBtn.disabled=false;return;}
-    const sponsored=gaslessEnabled&&holderInfo?.eligible&&gaslessConfig?.enabled;
-    els.actionBtn.textContent=sponsored?`SWAP GASLESS VIA ${selectedQuote.label.toUpperCase()}`:`EXECUTE VIA ${selectedQuote.label.toUpperCase()}`;
-    els.actionBtn.disabled=false;
+    els.actionBtn.textContent=`EXECUTE VIA ${selectedQuote.label.toUpperCase()}`; els.actionBtn.disabled=false;
   }
 
   async function setPair(a,b){
@@ -731,13 +598,6 @@ a{color:inherit}
   bindTokenSearch(els.sellTokenSearch,els.sellToken,"sell");
   bindTokenSearch(els.buyTokenSearch,els.buyToken,"buy");
 
-  els.gaslessToggle.addEventListener("click",()=>{
-    if(els.gaslessToggle.disabled)return;
-    gaslessEnabled=!gaslessEnabled;
-    els.gaslessToggle.classList.toggle("on",gaslessEnabled);
-    els.gaslessToggle.textContent=gaslessEnabled?"GASLESS ON":"GASLESS OFF";
-    updateAction();
-  });
   els.walletBtn.addEventListener("click",connect);
   els.actionBtn.addEventListener("click",()=>{if(!account)connect(); else if(!selectedQuote)getQuote(); else execute();});
   els.sellAmount.addEventListener("input",()=>{selectedQuote=null;updateAction();scheduleQuote()});
@@ -759,7 +619,7 @@ a{color:inherit}
   }));
 
   if(window.ethereum){
-    ethereum.on?.("accountsChanged",async a=>{account=a?.[0]||null;if(account){els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected")}else{els.walletBtn.textContent="CONNECT WALLET";els.walletBtn.classList.remove("connected")}selectedQuote=null;await updateBalance();await refreshGaslessEligibility();updateAction();});
+    ethereum.on?.("accountsChanged",async a=>{account=a?.[0]||null;if(account){els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected")}else{els.walletBtn.textContent="CONNECT WALLET";els.walletBtn.classList.remove("connected")}selectedQuote=null;await updateBalance();updateAction();});
     ethereum.on?.("chainChanged",()=>location.reload());
     ethereum.request({method:"eth_accounts"}).then(async a=>{if(a?.[0]){account=a[0];els.walletBtn.textContent=short(account);els.walletBtn.classList.add("connected");await updateBalance();updateAction();}}).catch(()=>{});
   }
